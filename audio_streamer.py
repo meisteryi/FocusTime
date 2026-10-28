@@ -1,44 +1,86 @@
 """
 FocusTime - Audio Streaming Module
 Features:
-- Triple-Layer Zero-Ad System:
-  1. Network-Level AdBlock Interceptor (QWebEngineUrlRequestInterceptor)
-  2. Sub-second Ad Fast-Forwarder (16x speed + instant jump to end + auto-mute)
-  3. Auto Ad-Skip Button Clicker
+- In-Page Trusted Supervisor (Bypasses YouTube TrustedTypes CSP)
+- Precision Zero-Ad Engine:
+  - Exact active ad detection (`ad-showing` / `ad-interrupting` on player)
+  - Auto-mute during ads (Zero ad audio leaks)
+  - 16x fast-forward on active ads
+  - Instant auto-click for skip buttons
+  - Clean restoration of 1.0x speed and un-muted volume for the actual music
 - YouTube In-App Search (SearchThread using yt-dlp)
 - Real-time Chromium Audio Streaming Engine
 - Seamless Endless Queue & Autoplay of Related Tracks
 """
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, QUrl, QTimer
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings, QWebEngineProfile
-from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
 import yt_dlp
 import re
 
 
-class AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
-    """Network-level ad request blocker"""
-    BLOCKED_PATTERNS = [
-        "googleads.g.doubleclick.net",
-        "static.doubleclick.net",
-        "pubads.g.doubleclick.net",
-        "pagead2.googlesyndication.com",
-        "/pagead/",
-        "/api/stats/ads",
-        "/youtubei/v1/log_event",
-        "googlevideo.com/videoplayback?expire=", # only if adformat
-        "ad_status",
-        "adformat",
-        "ad_type"
-    ]
+IN_PAGE_SUPERVISOR_JS = """
+(function() {
+    window.__ft_target_volume = 0.7;
 
-    def interceptRequest(self, info):
-        url = info.requestUrl().toString()
-        for pattern in self.BLOCKED_PATTERNS:
-            if pattern in url and "ad" in pattern:
-                info.block(True)
-                return
+    // Background interval inside the YouTube page
+    if (window.__ft_timer) clearInterval(window.__ft_timer);
+    window.__ft_timer = setInterval(function() {
+        var player = document.querySelector('#movie_player');
+        var v = document.querySelector('video');
+        if (!v) return;
+
+        // Accurate ad detection
+        var isAd = player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting'));
+        if (isAd) {
+            v.muted = true;
+            v.playbackRate = 16.0;
+        } else {
+            if (v.muted) v.muted = false;
+            if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
+            v.volume = window.__ft_target_volume;
+            if (v.paused && !v.ended) {
+                v.play().catch(function(e){});
+            }
+        }
+
+        // Auto click skip buttons
+        var skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button');
+        if (skip) {
+            try { skip.click(); } catch(e) {}
+        }
+    }, 350);
+
+    window.__ft_get_status = function() {
+        var v = document.querySelector('video');
+        if (!v) return { status: 'no_video' };
+        var player = document.querySelector('#movie_player');
+        var isAd = player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting'));
+        return {
+            status: 'playing',
+            isAd: !!isAd,
+            time: v.currentTime,
+            duration: v.duration,
+            ended: v.ended,
+            paused: v.paused
+        };
+    };
+
+    window.__ft_set_volume = function(val) {
+        window.__ft_target_volume = val;
+        var v = document.querySelector('video');
+        if (v) v.volume = val;
+    };
+
+    window.__ft_toggle = function() {
+        var v = document.querySelector('video');
+        if (v) {
+            if (v.paused) v.play();
+            else v.pause();
+        }
+    };
+})();
+"""
 
 
 class SearchThread(QThread):
@@ -98,11 +140,7 @@ class AudioPlayer(QObject):
     def __init__(self, parent_widget=None):
         super().__init__(parent_widget)
 
-        # 1. Install Network AdBlock Interceptor on the default profile
-        self.ad_interceptor = AdBlockInterceptor()
-        QWebEngineProfile.defaultProfile().setUrlRequestInterceptor(self.ad_interceptor)
-
-        # 2. Hidden WebEngine for background audio streaming
+        # Hidden WebEngine for background audio streaming
         self.web_view = QWebEngineView(parent_widget)
         self.web_view.setVisible(False)
         self.web_view.resize(1, 1)
@@ -111,6 +149,8 @@ class AudioPlayer(QObject):
         settings.setAttribute(QWebEngineSettings.PlaybackRequiresUserGesture, False)
         settings.setAttribute(QWebEngineSettings.PluginsEnabled, True)
         settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+
+        self.web_view.loadFinished.connect(self._on_page_loaded)
 
         self.current_track = None
         self.queue = []
@@ -122,10 +162,16 @@ class AudioPlayer(QObject):
 
         self.search_thread = None
 
-        # High-frequency monitor timer (250ms) to eliminate ads instantly
+        # Watcher timer
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self._monitor_playback)
-        self.monitor_timer.start(250)
+        self.monitor_timer.start(600)
+
+    def _on_page_loaded(self, ok: bool):
+        if ok:
+            # Inject supervisor once
+            self.web_view.page().runJavaScript(IN_PAGE_SUPERVISOR_JS)
+            self.set_volume(self.volume)
 
     def search(self, query: str, callback, error_callback=None):
         if self.search_thread and self.search_thread.isRunning():
@@ -166,7 +212,6 @@ class AudioPlayer(QObject):
                 vid_id = match.group(1)
 
         if vid_id:
-            # Load via embed mode or clean watch url
             target_url = f"https://www.youtube.com/watch?v={vid_id}"
         else:
             target_url = url
@@ -182,63 +227,11 @@ class AudioPlayer(QObject):
         if not self.is_playing or not self.current_track:
             return
 
-        target_vol = self.volume / 100.0
-
-        # JavaScript to detect, mute, and warp through ads instantly
-        js_script = f"""
-        (function() {{
-            var player = document.querySelector('#movie_player, .html5-video-player');
-            var isAd = document.querySelector('.ad-showing, .ad-interrupting, .video-ads, .ytp-ad-player-overlay, .ytp-ad-module');
-            var v = document.querySelector('video');
-
-            if (!v) return {{ status: 'no_video' }};
-
-            // 1. Detect if an ad is currently active
-            var adPlaying = (isAd !== null) || (player && player.classList.contains('ad-showing'));
-
-            if (adPlaying) {{
-                // MUTE AD INSTANTLY so user hears zero ad noise
-                v.muted = true;
-                // Warp playback to the end at 16x speed
-                v.playbackRate = 16.0;
-                if (!isNaN(v.duration) && v.duration > 0) {{
-                    v.currentTime = v.duration;
-                }}
-            }} else {{
-                // Normal Track: unmute & restore regular 1.0x playback speed
-                if (v.muted) v.muted = false;
-                if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
-                v.volume = {target_vol};
-                if (v.paused && !v.ended) {{
-                    v.play();
-                }}
-            }}
-
-            // 2. Click any skip button immediately
-            var skipBtns = document.querySelectorAll(
-                '.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button, [id^="skip-button"], button.ytp-ad-skip-button'
-            );
-            for (var i = 0; i < skipBtns.length; i++) {{
-                try {{ skipBtns[i].click(); }} catch(e) {{}}
-            }}
-
-            // 3. Remove overlay ads
-            var overlays = document.querySelectorAll('.ytp-ad-overlay-container, .ytp-ad-message-container');
-            for (var j = 0; j < overlays.length; j++) {{
-                overlays[j].remove();
-            }}
-
-            return {{
-                status: 'playing',
-                adPlaying: adPlaying,
-                currentTime: v.currentTime,
-                duration: v.duration,
-                ended: v.ended
-            }};
-        }})();
-        """
-
-        self.web_view.page().runJavaScript(js_script, self._on_monitor_result)
+        # Poll the lightweight in-page supervisor
+        self.web_view.page().runJavaScript(
+            "window.__ft_get_status ? window.__ft_get_status() : {status:'waiting'}",
+            self._on_monitor_result
+        )
 
     def _on_monitor_result(self, res):
         if not res or not isinstance(res, dict):
@@ -246,7 +239,7 @@ class AudioPlayer(QObject):
 
         status = res.get('status')
         if status == 'playing':
-            if res.get('adPlaying'):
+            if res.get('isAd'):
                 self.status_updated.emit("광고 자동 스킵 중...")
                 return
 
@@ -267,8 +260,7 @@ class AudioPlayer(QObject):
     def toggle_play(self):
         self.is_playing = not self.is_playing
         self.state_changed.emit(self.is_playing)
-        js = "var v = document.querySelector('video'); if (v) { if (v.paused) v.play(); else v.pause(); }"
-        self.web_view.page().runJavaScript(js)
+        self.web_view.page().runJavaScript("if (window.__ft_toggle) window.__ft_toggle();")
 
     def next_track(self):
         if self.current_index + 1 < len(self.queue):
@@ -308,8 +300,8 @@ class AudioPlayer(QObject):
 
     def set_volume(self, value: int):
         self.volume = max(0, min(100, value))
-        js = f"var v = document.querySelector('video'); if (v) v.volume = {self.volume / 100.0};"
-        self.web_view.page().runJavaScript(js)
+        vol = self.volume / 100.0
+        self.web_view.page().runJavaScript(f"if (window.__ft_set_volume) window.__ft_set_volume({vol});")
 
     def stop(self):
         self.is_playing = False

@@ -6,11 +6,15 @@ Zero-distraction, Breathing Ambient Fullscreen Focus Application.
 import sys
 import os
 
-# Crucial Chromium flags for background audio playback without user gesture requirement
+# Crucial Chromium flags: autoplay enabled, TrustedTypes CSP bypassed, sandbox disabled
 sys.argv.extend([
     '--autoplay-policy=no-user-gesture-required',
     '--no-sandbox',
-    '--disable-web-security'
+    '--disable-web-security',
+    '--disable-features=TrustedTypes,TrustedTypesEnforcement',
+    '--disable-blink-features=TrustedTypes',
+    '--ignore-certificate-errors',
+    '--log-level=3'
 ])
 
 from PyQt5.QtWidgets import QApplication
