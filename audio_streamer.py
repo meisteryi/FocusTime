@@ -1,17 +1,44 @@
 """
 FocusTime - Audio Streaming Module
 Features:
+- Triple-Layer Zero-Ad System:
+  1. Network-Level AdBlock Interceptor (QWebEngineUrlRequestInterceptor)
+  2. Sub-second Ad Fast-Forwarder (16x speed + instant jump to end + auto-mute)
+  3. Auto Ad-Skip Button Clicker
 - YouTube In-App Search (SearchThread using yt-dlp)
-- Real-time Chromium Audio Streaming Engine (using hidden QWebEngineView)
-- 100% Reliable playback without GoogleVideo 403 header block
-- Auto ad-skipper and zero visible UI (Pure Audio Mode)
+- Real-time Chromium Audio Streaming Engine
 - Seamless Endless Queue & Autoplay of Related Tracks
 """
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, QUrl, QTimer
-from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings, QWebEngineProfile
+from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 import yt_dlp
 import re
+
+
+class AdBlockInterceptor(QWebEngineUrlRequestInterceptor):
+    """Network-level ad request blocker"""
+    BLOCKED_PATTERNS = [
+        "googleads.g.doubleclick.net",
+        "static.doubleclick.net",
+        "pubads.g.doubleclick.net",
+        "pagead2.googlesyndication.com",
+        "/pagead/",
+        "/api/stats/ads",
+        "/youtubei/v1/log_event",
+        "googlevideo.com/videoplayback?expire=", # only if adformat
+        "ad_status",
+        "adformat",
+        "ad_type"
+    ]
+
+    def interceptRequest(self, info):
+        url = info.requestUrl().toString()
+        for pattern in self.BLOCKED_PATTERNS:
+            if pattern in url and "ad" in pattern:
+                info.block(True)
+                return
 
 
 class SearchThread(QThread):
@@ -71,7 +98,11 @@ class AudioPlayer(QObject):
     def __init__(self, parent_widget=None):
         super().__init__(parent_widget)
 
-        # Hidden WebEngine for background audio streaming
+        # 1. Install Network AdBlock Interceptor on the default profile
+        self.ad_interceptor = AdBlockInterceptor()
+        QWebEngineProfile.defaultProfile().setUrlRequestInterceptor(self.ad_interceptor)
+
+        # 2. Hidden WebEngine for background audio streaming
         self.web_view = QWebEngineView(parent_widget)
         self.web_view.setVisible(False)
         self.web_view.resize(1, 1)
@@ -91,10 +122,10 @@ class AudioPlayer(QObject):
 
         self.search_thread = None
 
-        # Watcher timer to ensure playback, auto-skip ads, and detect end of media
+        # High-frequency monitor timer (250ms) to eliminate ads instantly
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self._monitor_playback)
-        self.monitor_timer.start(800)
+        self.monitor_timer.start(250)
 
     def search(self, query: str, callback, error_callback=None):
         if self.search_thread and self.search_thread.isRunning():
@@ -128,17 +159,22 @@ class AudioPlayer(QObject):
         self.current_track = track
 
         url = track.get('url', '')
-        # Ensure clean watch url
-        if 'youtu.be/' in url:
-            vid_id = url.split('youtu.be/')[-1].split('?')[0]
-            url = f"https://www.youtube.com/watch?v={vid_id}"
-        elif 'watch?v=' not in url and track.get('id'):
-            url = f"https://www.youtube.com/watch?v={track['id']}"
+        vid_id = track.get('id')
+        if not vid_id:
+            match = re.search(r'(?:v=|\/)([0-9A-Za-z_-]{11}).*', url)
+            if match:
+                vid_id = match.group(1)
+
+        if vid_id:
+            # Load via embed mode or clean watch url
+            target_url = f"https://www.youtube.com/watch?v={vid_id}"
+        else:
+            target_url = url
 
         self.status_updated.emit("음악 스트림 연결 중...")
         self.title_updated.emit(track.get('title', '재생 중'), track.get('uploader', ''))
 
-        self.web_view.setUrl(QUrl(url))
+        self.web_view.setUrl(QUrl(target_url))
         self.is_playing = True
         self.state_changed.emit(True)
 
@@ -146,31 +182,58 @@ class AudioPlayer(QObject):
         if not self.is_playing or not self.current_track:
             return
 
+        target_vol = self.volume / 100.0
+
+        # JavaScript to detect, mute, and warp through ads instantly
         js_script = f"""
         (function() {{
-            // Auto click ad skip buttons if any
-            var skipBtns = document.querySelectorAll('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button');
+            var player = document.querySelector('#movie_player, .html5-video-player');
+            var isAd = document.querySelector('.ad-showing, .ad-interrupting, .video-ads, .ytp-ad-player-overlay, .ytp-ad-module');
+            var v = document.querySelector('video');
+
+            if (!v) return {{ status: 'no_video' }};
+
+            // 1. Detect if an ad is currently active
+            var adPlaying = (isAd !== null) || (player && player.classList.contains('ad-showing'));
+
+            if (adPlaying) {{
+                // MUTE AD INSTANTLY so user hears zero ad noise
+                v.muted = true;
+                // Warp playback to the end at 16x speed
+                v.playbackRate = 16.0;
+                if (!isNaN(v.duration) && v.duration > 0) {{
+                    v.currentTime = v.duration;
+                }}
+            }} else {{
+                // Normal Track: unmute & restore regular 1.0x playback speed
+                if (v.muted) v.muted = false;
+                if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
+                v.volume = {target_vol};
+                if (v.paused && !v.ended) {{
+                    v.play();
+                }}
+            }}
+
+            // 2. Click any skip button immediately
+            var skipBtns = document.querySelectorAll(
+                '.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button, [id^="skip-button"], button.ytp-ad-skip-button'
+            );
             for (var i = 0; i < skipBtns.length; i++) {{
                 try {{ skipBtns[i].click(); }} catch(e) {{}}
             }}
 
-            var video = document.querySelector('video');
-            if (!video) return {{ status: 'no_video' }};
-
-            // Set volume
-            video.volume = {self.volume / 100.0};
-
-            // Ensure playing
-            if (video.paused && !video.ended) {{
-                video.play();
+            // 3. Remove overlay ads
+            var overlays = document.querySelectorAll('.ytp-ad-overlay-container, .ytp-ad-message-container');
+            for (var j = 0; j < overlays.length; j++) {{
+                overlays[j].remove();
             }}
 
             return {{
                 status: 'playing',
-                paused: video.paused,
-                currentTime: video.currentTime,
-                duration: video.duration,
-                ended: video.ended
+                adPlaying: adPlaying,
+                currentTime: v.currentTime,
+                duration: v.duration,
+                ended: v.ended
             }};
         }})();
         """
@@ -183,6 +246,10 @@ class AudioPlayer(QObject):
 
         status = res.get('status')
         if status == 'playing':
+            if res.get('adPlaying'):
+                self.status_updated.emit("광고 자동 스킵 중...")
+                return
+
             if res.get('ended') or (res.get('duration') and res.get('currentTime', 0) >= res.get('duration', 0) - 1.5):
                 if not self._is_handling_end:
                     self._is_handling_end = True
@@ -191,6 +258,11 @@ class AudioPlayer(QObject):
                         self.next_track()
             else:
                 self.status_updated.emit("재생 중")
+
+    def get_current_url(self) -> str:
+        if self.current_track:
+            return self.current_track.get('url', '')
+        return ""
 
     def toggle_play(self):
         self.is_playing = not self.is_playing
@@ -229,11 +301,6 @@ class AudioPlayer(QObject):
                 self.status_updated.emit("재생 목록 종료")
 
         self.search(f"{query_words} playlist", on_related_found)
-
-    def get_current_url(self) -> str:
-        if self.current_track:
-            return self.current_track.get('url', '')
-        return ""
 
     def toggle_autoplay(self):
         self.autoplay = not self.autoplay
