@@ -23,33 +23,65 @@ IN_PAGE_SUPERVISOR_JS = """
 (function() {
     window.__ft_target_volume = 0.7;
 
-    // Background interval inside the YouTube page
+    function applyAdState(isAd) {
+        var v = document.querySelector('video');
+        if (!v) return;
+
+        if (isAd) {
+            // ZERO AUDIO LEAK: Instantly set volume to 0 AND mute
+            v.muted = true;
+            v.volume = 0;
+            v.playbackRate = 16.0;
+        } else {
+            // Restore actual music
+            if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
+            if (v.muted) v.muted = false;
+            v.volume = window.__ft_target_volume;
+            if (v.paused && !v.ended) {
+                v.play().catch(function(e){});
+            }
+        }
+    }
+
+    // 1. MutationObserver on #movie_player for INSTANT (0ms latency) ad muting
+    function initObserver() {
+        var player = document.querySelector('#movie_player');
+        if (!player) {
+            setTimeout(initObserver, 150);
+            return;
+        }
+
+        var observer = new MutationObserver(function(mutations) {
+            var isAd = player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting');
+            applyAdState(isAd);
+            if (isAd) {
+                var skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button');
+                if (skip) {
+                    try { skip.click(); } catch(e) {}
+                }
+            }
+        });
+        observer.observe(player, { attributes: true, attributeFilter: ['class'] });
+    }
+    initObserver();
+
+    // 2. High frequency interval (100ms) backup
     if (window.__ft_timer) clearInterval(window.__ft_timer);
     window.__ft_timer = setInterval(function() {
         var player = document.querySelector('#movie_player');
         var v = document.querySelector('video');
         if (!v) return;
 
-        // Accurate ad detection
         var isAd = player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting'));
+        applyAdState(isAd);
+
         if (isAd) {
-            v.muted = true;
-            v.playbackRate = 16.0;
-        } else {
-            if (v.muted) v.muted = false;
-            if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
-            v.volume = window.__ft_target_volume;
-            if (v.paused && !v.ended) {
-                v.play().catch(function(e){});
+            var skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button');
+            if (skip) {
+                try { skip.click(); } catch(e) {}
             }
         }
-
-        // Auto click skip buttons
-        var skip = document.querySelector('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-overlay-close-button');
-        if (skip) {
-            try { skip.click(); } catch(e) {}
-        }
-    }, 350);
+    }, 100);
 
     window.__ft_get_status = function() {
         var v = document.querySelector('video');
@@ -69,7 +101,7 @@ IN_PAGE_SUPERVISOR_JS = """
     window.__ft_set_volume = function(val) {
         window.__ft_target_volume = val;
         var v = document.querySelector('video');
-        if (v) v.volume = val;
+        if (v && !v.muted) v.volume = val;
     };
 
     window.__ft_toggle = function() {
