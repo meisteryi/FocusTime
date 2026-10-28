@@ -42,6 +42,7 @@ class FocusWindow(QWidget):
         # Time & Focus state
         self.focus_seconds = 0
         self.is_focus_active = True
+        self.leave_cooldown = 0  # 10-minute cooldown for temporary exit (in seconds)
 
         self.clock_timer = QTimer(self)
         self.clock_timer.timeout.connect(self._update_clock_and_timer)
@@ -110,9 +111,22 @@ class FocusWindow(QWidget):
         hint_label.setFont(QFont("Malgun Gothic", 10))
         hint_label.setStyleSheet("color: #6C8E86;")
 
-        btn_minimize = QPushButton("🗕 잠시 외출")
-        btn_minimize.setCursor(Qt.PointingHandCursor)
-        btn_minimize.setStyleSheet("""
+        # Real-time Cooldown Badge
+        self.cooldown_badge = QLabel("✨ 외출 가능")
+        self.cooldown_badge.setFont(QFont("Malgun Gothic", 10, QFont.Bold))
+        self.cooldown_badge.setStyleSheet("""
+            QLabel {
+                background: rgba(78, 204, 163, 0.12);
+                color: #4ECCA3;
+                border: 1px solid rgba(78, 204, 163, 0.3);
+                border-radius: 10px;
+                padding: 5px 12px;
+            }
+        """)
+
+        self.btn_minimize = QPushButton("🗕 잠시 외출")
+        self.btn_minimize.setCursor(Qt.PointingHandCursor)
+        self.btn_minimize.setStyleSheet("""
             QPushButton {
                 background: rgba(255, 255, 255, 0.06);
                 color: #A3C9C2;
@@ -127,7 +141,7 @@ class FocusWindow(QWidget):
                 border-color: #4ECCA3;
             }
         """)
-        btn_minimize.clicked.connect(self.showMinimized)
+        self.btn_minimize.clicked.connect(self.handle_temporary_exit)
 
         btn_exit_corner = QPushButton("✕")
         btn_exit_corner.setFixedSize(36, 36)
@@ -151,7 +165,9 @@ class FocusWindow(QWidget):
         top_bar.addSpacing(16)
         top_bar.addWidget(hint_label)
         top_bar.addStretch()
-        top_bar.addWidget(btn_minimize)
+        top_bar.addWidget(self.cooldown_badge)
+        top_bar.addSpacing(10)
+        top_bar.addWidget(self.btn_minimize)
         top_bar.addSpacing(12)
         top_bar.addWidget(btn_exit_corner)
         main_layout.addLayout(top_bar)
@@ -517,6 +533,84 @@ class FocusWindow(QWidget):
         if ok and text.strip():
             self.audio_player.play_url(text.strip())
 
+    def handle_temporary_exit(self):
+        if self.leave_cooldown > 0:
+            m = self.leave_cooldown // 60
+            s = self.leave_cooldown % 60
+            self.status_label.setText(f"⚠️ 잠시 외출은 10분에 1회만 가능합니다! (남은 대기: {m}분 {s:02d}초)")
+            return
+
+        # Start 10-minute (600 seconds) cooldown
+        self.leave_cooldown = 600
+        self._update_minimize_btn_style()
+        self.showMinimized()
+
+    def _update_minimize_btn_style(self):
+        if self.leave_cooldown > 0:
+            m = self.leave_cooldown // 60
+            s = self.leave_cooldown % 60
+
+            # Badge: Highly visible countdown
+            self.cooldown_badge.setText(f"⏳ 외출 쿨다운: {m}분 {s:02d}초 남음")
+            self.cooldown_badge.setStyleSheet("""
+                QLabel {
+                    background: rgba(255, 170, 0, 0.15);
+                    color: #FFB84D;
+                    border: 1px solid rgba(255, 170, 0, 0.4);
+                    border-radius: 10px;
+                    padding: 5px 14px;
+                    font-weight: bold;
+                }
+            """)
+
+            # Button: Dimmed state
+            self.btn_minimize.setText(f"🗕 대기 중 ({m:02d}:{s:02d})")
+            self.btn_minimize.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 255, 255, 0.02);
+                    color: #55756E;
+                    border: 1px solid #163630;
+                    border-radius: 12px;
+                    padding: 6px 14px;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 90, 95, 0.15);
+                    color: #FFA5A8;
+                    border-color: #FF5A5F;
+                }
+            """)
+        else:
+            # Badge: Ready state
+            self.cooldown_badge.setText("✨ 외출 가능")
+            self.cooldown_badge.setStyleSheet("""
+                QLabel {
+                    background: rgba(78, 204, 163, 0.12);
+                    color: #4ECCA3;
+                    border: 1px solid rgba(78, 204, 163, 0.3);
+                    border-radius: 10px;
+                    padding: 5px 12px;
+                }
+            """)
+
+            # Button: Active state
+            self.btn_minimize.setText("🗕 잠시 외출")
+            self.btn_minimize.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 255, 255, 0.06);
+                    color: #A3C9C2;
+                    border: 1px solid rgba(255, 255, 255, 0.12);
+                    border-radius: 12px;
+                    padding: 6px 14px;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background: rgba(78, 204, 163, 0.2);
+                    color: #FFFFFF;
+                    border-color: #4ECCA3;
+                }
+            """)
+
     def _update_clock_and_timer(self):
         now = datetime.now()
         self.clock_label.setText(now.strftime("%H : %M : %S"))
@@ -531,6 +625,11 @@ class FocusWindow(QWidget):
             m = (self.focus_seconds % 3600) // 60
             s = self.focus_seconds % 60
             self.timer_label.setText(f"{h:02d} : {m:02d} : {s:02d}")
+
+        # Update 10-minute leave cooldown
+        if self.leave_cooldown > 0:
+            self.leave_cooldown -= 1
+            self._update_minimize_btn_style()
 
     def toggle_focus(self):
         self.is_focus_active = not self.is_focus_active
@@ -626,6 +725,6 @@ class FocusWindow(QWidget):
         if event.key() == Qt.Key_Escape:
             self.request_exit()
         elif event.key() == Qt.Key_F10:
-            self.showMinimized()
+            self.handle_temporary_exit()
         else:
             super().keyPressEvent(event)

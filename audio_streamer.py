@@ -298,8 +298,11 @@ class AudioPlayer(QObject):
         if self.current_index + 1 < len(self.queue):
             self.current_index += 1
             self._play_current()
-        elif self.autoplay and self.current_track:
+        elif self.autoplay:
             self._fetch_related_and_continue()
+        elif len(self.queue) > 0:
+            self.current_index = 0
+            self._play_current()
 
     def prev_track(self):
         if self.current_index > 0:
@@ -309,22 +312,49 @@ class AudioPlayer(QObject):
             self.web_view.page().runJavaScript("var v = document.querySelector('video'); if (v) v.currentTime = 0;")
 
     def _fetch_related_and_continue(self):
-        query = self.current_track.get('title', '')
-        query_words = " ".join([w for w in query.split() if len(w) > 1][:4])
-        self.status_updated.emit("다음 연관 곡 검색 중...")
+        if not self.current_track and not self.queue:
+            return
+
+        query = self.current_track.get('title', '') if self.current_track else ''
+        uploader = self.current_track.get('uploader', '') if self.current_track else ''
+
+        # Clean search keywords from title and artist
+        clean_words = [w for w in re.sub(r'[\(\)\[\]\{\}\-\_\,\.\!\?\#\<\>]', ' ', query).split() if len(w) > 1]
+        if clean_words:
+            search_kw = " ".join(clean_words[:3])
+        elif uploader and uploader not in ['Unknown Artist', 'Custom URL']:
+            search_kw = uploader
+        else:
+            search_kw = "lofi study playlist"
+
+        self.status_updated.emit("다음 연관 곡 찾는 중...")
 
         def on_related_found(new_tracks):
-            existing_urls = {t.get('url') for t in self.queue}
-            fresh_tracks = [t for t in new_tracks if t.get('url') not in existing_urls]
+            # Exclude only currently playing or very recent tracks (last 3)
+            recent_urls = {t.get('url') for t in self.queue[-3:]}
+            fresh_tracks = [t for t in new_tracks if t.get('url') not in recent_urls]
+
             if fresh_tracks:
                 self.queue.extend(fresh_tracks)
                 self.current_index += 1
                 self.queue_updated.emit(self.queue, self.current_index)
                 self._play_current()
-            else:
-                self.status_updated.emit("재생 목록 종료")
+            elif len(self.queue) > 0:
+                # NEVER stop: Loop existing playlist seamlessly
+                self.status_updated.emit("대기열을 처음부터 이어서 재생합니다...")
+                self.current_index = 0
+                self.queue_updated.emit(self.queue, self.current_index)
+                self._play_current()
 
-        self.search(f"{query_words} playlist", on_related_found)
+        def on_search_fail(err):
+            # Fallback on search error: loop existing songs
+            if len(self.queue) > 0:
+                self.status_updated.emit("연관 곡을 계속해서 재생합니다...")
+                self.current_index = 0
+                self.queue_updated.emit(self.queue, self.current_index)
+                self._play_current()
+
+        self.search(f"{search_kw} playlist", on_related_found, on_search_fail)
 
     def toggle_autoplay(self):
         self.autoplay = not self.autoplay
