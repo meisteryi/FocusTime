@@ -1,16 +1,20 @@
 """
 FocusTime - Audio Streaming Module
 Features:
-- In-Page Trusted Supervisor (Bypasses YouTube TrustedTypes CSP)
+- Official YouTube Algorithm Endless Radio Mix (`list=RD{VIDEO_ID}`):
+  - Streams real YouTube recommendations based on the selected song (Just like native YouTube)
+  - Seamless in-player navigation (Instant track change without full page reloads)
 - Precision Zero-Ad Engine:
   - Exact active ad detection (`ad-showing` / `ad-interrupting` on player)
   - Auto-mute during ads (Zero ad audio leaks)
   - 16x fast-forward on active ads
   - Instant auto-click for skip buttons
   - Clean restoration of 1.0x speed and un-muted volume for the actual music
-- YouTube In-App Search (SearchThread using yt-dlp)
-- Real-time Chromium Audio Streaming Engine
-- Seamless Endless Queue & Autoplay of Related Tracks
+- Robust Playback State Management:
+  - Explicit user pause flag (`__ft_is_paused`)
+  - True play/pause toggle synchronization
+- Self-Healing Supervisor Injection & Direct Volume Control
+- In-App YouTube Search with yt-dlp
 """
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, QUrl, QTimer
@@ -21,7 +25,8 @@ import re
 
 IN_PAGE_SUPERVISOR_JS = """
 (function() {
-    window.__ft_target_volume = 0.7;
+    window.__ft_target_volume = (typeof window.__ft_target_volume !== 'undefined') ? window.__ft_target_volume : 0.7;
+    window.__ft_is_paused = (typeof window.__ft_is_paused !== 'undefined') ? window.__ft_is_paused : false;
 
     function applyAdState(isAd) {
         var v = document.querySelector('video');
@@ -32,18 +37,22 @@ IN_PAGE_SUPERVISOR_JS = """
             v.muted = true;
             v.volume = 0;
             v.playbackRate = 16.0;
+            if (!isNaN(v.duration) && v.duration > 0) {
+                try { v.currentTime = v.duration; } catch(e) {}
+            }
         } else {
-            // Restore actual music
             if (v.playbackRate !== 1.0) v.playbackRate = 1.0;
             if (v.muted) v.muted = false;
             v.volume = window.__ft_target_volume;
-            if (v.paused && !v.ended) {
+
+            // Only auto-play if the user HAS NOT explicitly paused
+            if (!window.__ft_is_paused && v.paused && !v.ended) {
                 v.play().catch(function(e){});
             }
         }
     }
 
-    // 1. MutationObserver on #movie_player for INSTANT (0ms latency) ad muting
+    // 1. MutationObserver on #movie_player
     function initObserver() {
         var player = document.querySelector('#movie_player');
         if (!player) {
@@ -65,7 +74,7 @@ IN_PAGE_SUPERVISOR_JS = """
     }
     initObserver();
 
-    // 2. High frequency interval (100ms) backup
+    // 2. High-frequency supervision interval
     if (window.__ft_timer) clearInterval(window.__ft_timer);
     window.__ft_timer = setInterval(function() {
         var player = document.querySelector('#movie_player');
@@ -81,20 +90,72 @@ IN_PAGE_SUPERVISOR_JS = """
                 try { skip.click(); } catch(e) {}
             }
         }
-    }, 100);
+    }, 120);
+
+    // Extract YouTube Algorithm's Recommended Mix Tracks
+    window.__ft_get_mix_tracks = function() {
+        var tracks = [];
+        var items = document.querySelectorAll('ytd-playlist-panel-video-renderer');
+        items.forEach(function(el) {
+            var titleEl = el.querySelector('#video-title');
+            var bylineEl = el.querySelector('#byline');
+            var a = el.querySelector('a');
+            if (a) {
+                var href = a.getAttribute('href') || '';
+                var m = href.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+                if (m) {
+                    var vidId = m[1];
+                    var title = titleEl ? titleEl.innerText.trim() : '';
+                    var uploader = bylineEl ? bylineEl.innerText.trim() : '';
+                    if (title && !tracks.some(function(t){ return t.id === vidId; })) {
+                        tracks.push({
+                            id: vidId,
+                            title: title,
+                            uploader: uploader,
+                            url: 'https://www.youtube.com/watch?v=' + vidId
+                        });
+                    }
+                }
+            }
+        });
+        return tracks;
+    };
 
     window.__ft_get_status = function() {
         var v = document.querySelector('video');
         if (!v) return { status: 'no_video' };
         var player = document.querySelector('#movie_player');
         var isAd = player && (player.classList.contains('ad-showing') || player.classList.contains('ad-interrupting'));
+
+        // Current track meta from YouTube player or DOM
+        var currentTitle = "";
+        var currentUploader = "";
+        if (player && typeof player.getVideoData === 'function') {
+            var data = player.getVideoData();
+            if (data) {
+                currentTitle = data.title || "";
+                currentUploader = data.author || "";
+            }
+        }
+        if (!currentTitle) {
+            var tEl = document.querySelector('h1.ytd-watch-metadata, #title h1');
+            if (tEl) currentTitle = tEl.innerText.trim();
+        }
+
+        var mixTracks = window.__ft_get_mix_tracks();
+
         return {
             status: 'playing',
             isAd: !!isAd,
             time: v.currentTime,
             duration: v.duration,
             ended: v.ended,
-            paused: v.paused
+            paused: v.paused,
+            userPaused: window.__ft_is_paused,
+            currentTitle: currentTitle,
+            currentUploader: currentUploader,
+            currentUrl: window.location.href,
+            mixTracks: mixTracks
         };
     };
 
@@ -104,12 +165,56 @@ IN_PAGE_SUPERVISOR_JS = """
         if (v && !v.muted) v.volume = val;
     };
 
+    window.__ft_play = function() {
+        window.__ft_is_paused = false;
+        var v = document.querySelector('video');
+        if (v) v.play().catch(function(e){});
+    };
+
+    window.__ft_pause = function() {
+        window.__ft_is_paused = true;
+        var v = document.querySelector('video');
+        if (v) v.pause();
+    };
+
     window.__ft_toggle = function() {
         var v = document.querySelector('video');
-        if (v) {
-            if (v.paused) v.play();
-            else v.pause();
+        if (!v) return;
+        if (v.paused) {
+            window.__ft_play();
+        } else {
+            window.__ft_pause();
         }
+    };
+
+    window.__ft_next_video = function() {
+        window.__ft_is_paused = false;
+        var nextBtn = document.querySelector('.ytp-next-button');
+        if (nextBtn) {
+            nextBtn.click();
+            return true;
+        }
+        var player = document.querySelector('#movie_player');
+        if (player && typeof player.nextVideo === 'function') {
+            player.nextVideo();
+            return true;
+        }
+        return false;
+    };
+
+    window.__ft_prev_video = function() {
+        window.__ft_is_paused = false;
+        var prevBtn = document.querySelector('.ytp-prev-button');
+        if (prevBtn) {
+            prevBtn.click();
+            return true;
+        }
+        var player = document.querySelector('#movie_player');
+        if (player && typeof player.previousVideo === 'function') {
+            player.previousVideo();
+            return true;
+        }
+        return false;
     };
 })();
 """
@@ -191,19 +296,19 @@ class AudioPlayer(QObject):
         self.autoplay = True
         self.is_playing = False
         self._is_handling_end = False
+        self._connection_watchdog_count = 0
+        self._last_loaded_url = ""
 
         self.search_thread = None
 
-        # Watcher timer
+        # Watcher timer (every 400ms)
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self._monitor_playback)
-        self.monitor_timer.start(600)
+        self.monitor_timer.start(400)
 
     def _on_page_loaded(self, ok: bool):
-        if ok:
-            # Inject supervisor once
-            self.web_view.page().runJavaScript(IN_PAGE_SUPERVISOR_JS)
-            self.set_volume(self.volume)
+        self.web_view.page().runJavaScript(IN_PAGE_SUPERVISOR_JS)
+        self.set_volume(self.volume)
 
     def search(self, query: str, callback, error_callback=None):
         if self.search_thread and self.search_thread.isRunning():
@@ -216,23 +321,25 @@ class AudioPlayer(QObject):
         self.search_thread.start()
 
     def set_queue_and_play(self, track_list: list, start_index: int = 0):
-        self.queue = track_list
+        """Starts playback and activates the YouTube Algorithm Endless Radio Mix for the chosen song"""
+        self.queue = list(track_list)
         self.current_index = start_index
         self.queue_updated.emit(self.queue, self.current_index)
-        self._play_current()
+        self._play_current(enable_radio_mix=True)
 
     def play_url(self, url: str, title: str = "YouTube BGM"):
         track_info = {'title': title, 'url': url, 'uploader': 'Custom URL', 'duration': ''}
         self.queue = [track_info]
         self.current_index = 0
         self.queue_updated.emit(self.queue, self.current_index)
-        self._play_current()
+        self._play_current(enable_radio_mix=True)
 
-    def _play_current(self):
+    def _play_current(self, enable_radio_mix: bool = True):
         if not (0 <= self.current_index < len(self.queue)):
             return
 
         self._is_handling_end = False
+        self._connection_watchdog_count = 0
         track = self.queue[self.current_index]
         self.current_track = track
 
@@ -243,46 +350,103 @@ class AudioPlayer(QObject):
             if match:
                 vid_id = match.group(1)
 
-        if vid_id:
+        # Official YouTube Endless Radio Mix param (&list=RD{VIDEO_ID})
+        if vid_id and enable_radio_mix:
+            target_url = f"https://www.youtube.com/watch?v={vid_id}&list=RD{vid_id}"
+        elif vid_id:
             target_url = f"https://www.youtube.com/watch?v={vid_id}"
         else:
             target_url = url
 
-        self.status_updated.emit("음악 스트림 연결 중...")
+        self.status_updated.emit("YouTube 추천 알고리즘 믹스 연결 중...")
         self.title_updated.emit(track.get('title', '재생 중'), track.get('uploader', ''))
 
+        self._last_loaded_url = target_url
         self.web_view.setUrl(QUrl(target_url))
         self.is_playing = True
         self.state_changed.emit(True)
 
     def _monitor_playback(self):
-        if not self.is_playing or not self.current_track:
+        if not self.current_track:
             return
 
-        # Poll the lightweight in-page supervisor
-        self.web_view.page().runJavaScript(
-            "window.__ft_get_status ? window.__ft_get_status() : {status:'waiting'}",
-            self._on_monitor_result
-        )
+        poll_js = """
+        (function() {
+            if (typeof window.__ft_get_status === 'function') {
+                return window.__ft_get_status();
+            }
+            return { status: 'need_inject' };
+        })();
+        """
+        self.web_view.page().runJavaScript(poll_js, self._on_monitor_result)
 
     def _on_monitor_result(self, res):
         if not res or not isinstance(res, dict):
             return
 
         status = res.get('status')
-        if status == 'playing':
-            if res.get('isAd'):
-                self.status_updated.emit("광고 자동 스킵 중...")
-                return
 
-            if res.get('ended') or (res.get('duration') and res.get('currentTime', 0) >= res.get('duration', 0) - 1.5):
-                if not self._is_handling_end:
-                    self._is_handling_end = True
-                    if self.autoplay:
-                        self.status_updated.emit("곡 종료 - 다음 연관곡으로 넘어갑니다...")
-                        self.next_track()
-            else:
-                self.status_updated.emit("재생 중")
+        # 1. Re-inject supervisor if missing
+        if status == 'need_inject':
+            self.web_view.page().runJavaScript(IN_PAGE_SUPERVISOR_JS)
+            vol = self.volume / 100.0
+            self.web_view.page().runJavaScript(f"if (window.__ft_set_volume) window.__ft_set_volume({vol});")
+            return
+
+        # 2. Connection watchdog
+        if status == 'no_video':
+            self._connection_watchdog_count += 1
+            if self._connection_watchdog_count > 15:  # ~6 seconds timeout
+                self.status_updated.emit("스트림 지연 - 다음 알고리즘 추천 곡으로 전환합니다...")
+                self._connection_watchdog_count = 0
+                self.next_track()
+            return
+        else:
+            self._connection_watchdog_count = 0
+
+        # 3. Dynamic Title & Track Synchronization from YouTube
+        current_title = res.get('currentTitle')
+        current_uploader = res.get('currentUploader')
+        if current_title and self.current_track:
+            if current_title != self.current_track.get('title'):
+                self.current_track['title'] = current_title
+                if current_uploader:
+                    self.current_track['uploader'] = current_uploader
+                self.title_updated.emit(current_title, current_uploader or '')
+
+        # 4. Integrate YouTube's Algorithm Recommended Mix Queue into our player
+        mix_tracks = res.get('mixTracks')
+        if mix_tracks and len(mix_tracks) > 1:
+            # Sync algorithm mix tracks into self.queue if they aren't already populated
+            existing_ids = {t.get('id') for t in self.queue}
+            new_additions = [t for t in mix_tracks if t.get('id') not in existing_ids]
+            if new_additions:
+                self.queue.extend(new_additions)
+                self.queue_updated.emit(self.queue, self.current_index)
+
+        # 5. Synchronize actual playing state with UI
+        is_paused = res.get('paused', False)
+        actual_playing = (not is_paused) and (status == 'playing')
+        if actual_playing != self.is_playing:
+            self.is_playing = actual_playing
+            self.state_changed.emit(self.is_playing)
+
+        # 6. Handle Ad State
+        if res.get('isAd'):
+            self.status_updated.emit("광고 자동 스킵 중...")
+            return
+
+        # 7. Handle Track End and YouTube Continuous Autoplay
+        if res.get('ended') or (res.get('duration') and res.get('currentTime', 0) >= res.get('duration', 0) - 1.5):
+            if not self._is_handling_end:
+                self._is_handling_end = True
+                if self.autoplay:
+                    self.status_updated.emit("다음 추천 곡으로 자동 전환 중...")
+                    self.next_track()
+        elif is_paused:
+            self.status_updated.emit("일시 정지됨")
+        else:
+            self.status_updated.emit("YouTube 알고리즘 믹스 재생 중")
 
     def get_current_url(self) -> str:
         if self.current_track:
@@ -290,71 +454,52 @@ class AudioPlayer(QObject):
         return ""
 
     def toggle_play(self):
-        self.is_playing = not self.is_playing
-        self.state_changed.emit(self.is_playing)
-        self.web_view.page().runJavaScript("if (window.__ft_toggle) window.__ft_toggle();")
+        """Toggle playback cleanly with guaranteed execution"""
+        if self.is_playing:
+            self.is_playing = False
+            self.state_changed.emit(False)
+            self.web_view.page().runJavaScript("if (window.__ft_pause) window.__ft_pause(); else { var v = document.querySelector('video'); if (v) v.pause(); }")
+            self.status_updated.emit("일시 정지됨")
+        else:
+            self.is_playing = True
+            self.state_changed.emit(True)
+            self.web_view.page().runJavaScript("if (window.__ft_play) window.__ft_play(); else { var v = document.querySelector('video'); if (v) v.play(); }")
+            self.status_updated.emit("YouTube 알고리즘 믹스 재생 중")
 
     def next_track(self):
-        if self.current_index + 1 < len(self.queue):
-            self.current_index += 1
-            self._play_current()
-        elif self.autoplay:
-            self._fetch_related_and_continue()
-        elif len(self.queue) > 0:
-            self.current_index = 0
-            self._play_current()
+        """Advances to the next track using YouTube's in-player navigation (Instant & seamless)"""
+        self._is_handling_end = False
+
+        # Try fast in-player next first
+        def on_next_result(success):
+            if not success:
+                # Fallback to queue index progression
+                if self.current_index + 1 < len(self.queue):
+                    self.current_index += 1
+                    self._play_current(enable_radio_mix=False)
+                elif len(self.queue) > 0:
+                    self.current_index = 0
+                    self._play_current(enable_radio_mix=True)
+
+        self.web_view.page().runJavaScript(
+            "window.__ft_next_video ? window.__ft_next_video() : false;",
+            on_next_result
+        )
 
     def prev_track(self):
-        if self.current_index > 0:
-            self.current_index -= 1
-            self._play_current()
-        else:
-            self.web_view.page().runJavaScript("var v = document.querySelector('video'); if (v) v.currentTime = 0;")
+        """Returns to previous track"""
+        def on_prev_result(success):
+            if not success:
+                if self.current_index > 0:
+                    self.current_index -= 1
+                    self._play_current(enable_radio_mix=False)
+                else:
+                    self.web_view.page().runJavaScript("var v = document.querySelector('video'); if (v) v.currentTime = 0;")
 
-    def _fetch_related_and_continue(self):
-        if not self.current_track and not self.queue:
-            return
-
-        query = self.current_track.get('title', '') if self.current_track else ''
-        uploader = self.current_track.get('uploader', '') if self.current_track else ''
-
-        # Clean search keywords from title and artist
-        clean_words = [w for w in re.sub(r'[\(\)\[\]\{\}\-\_\,\.\!\?\#\<\>]', ' ', query).split() if len(w) > 1]
-        if clean_words:
-            search_kw = " ".join(clean_words[:3])
-        elif uploader and uploader not in ['Unknown Artist', 'Custom URL']:
-            search_kw = uploader
-        else:
-            search_kw = "lofi study playlist"
-
-        self.status_updated.emit("다음 연관 곡 찾는 중...")
-
-        def on_related_found(new_tracks):
-            # Exclude only currently playing or very recent tracks (last 3)
-            recent_urls = {t.get('url') for t in self.queue[-3:]}
-            fresh_tracks = [t for t in new_tracks if t.get('url') not in recent_urls]
-
-            if fresh_tracks:
-                self.queue.extend(fresh_tracks)
-                self.current_index += 1
-                self.queue_updated.emit(self.queue, self.current_index)
-                self._play_current()
-            elif len(self.queue) > 0:
-                # NEVER stop: Loop existing playlist seamlessly
-                self.status_updated.emit("대기열을 처음부터 이어서 재생합니다...")
-                self.current_index = 0
-                self.queue_updated.emit(self.queue, self.current_index)
-                self._play_current()
-
-        def on_search_fail(err):
-            # Fallback on search error: loop existing songs
-            if len(self.queue) > 0:
-                self.status_updated.emit("연관 곡을 계속해서 재생합니다...")
-                self.current_index = 0
-                self.queue_updated.emit(self.queue, self.current_index)
-                self._play_current()
-
-        self.search(f"{search_kw} playlist", on_related_found, on_search_fail)
+        self.web_view.page().runJavaScript(
+            "window.__ft_prev_video ? window.__ft_prev_video() : false;",
+            on_prev_result
+        )
 
     def toggle_autoplay(self):
         self.autoplay = not self.autoplay
@@ -363,7 +508,19 @@ class AudioPlayer(QObject):
     def set_volume(self, value: int):
         self.volume = max(0, min(100, value))
         vol = self.volume / 100.0
-        self.web_view.page().runJavaScript(f"if (window.__ft_set_volume) window.__ft_set_volume({vol});")
+        js = f"""
+        (function() {{
+            window.__ft_target_volume = {vol};
+            if (typeof window.__ft_set_volume === 'function') {{
+                window.__ft_set_volume({vol});
+            }}
+            var v = document.querySelector('video');
+            if (v) {{
+                v.volume = {vol};
+            }}
+        }})();
+        """
+        self.web_view.page().runJavaScript(js)
 
     def stop(self):
         self.is_playing = False
