@@ -15,13 +15,15 @@ from PyQt5.QtGui import QFont
 
 class SearchResultItemWidget(QWidget):
     copy_requested = pyqtSignal(str)
+    favorite_toggled = pyqtSignal(str, bool)
 
-    def __init__(self, track_info: dict, parent=None):
+    def __init__(self, track_info: dict, storage=None, parent=None):
         super().__init__(parent)
         self.track_info = track_info
+        self.storage = storage
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         # Info Box (Title + Meta)
         info_layout = QVBoxLayout()
@@ -49,6 +51,14 @@ class SearchResultItemWidget(QWidget):
         info_layout.addWidget(title_label)
         info_layout.addLayout(meta_layout)
 
+        # Quick Favorite Button
+        self.btn_fav = QPushButton("☆")
+        self.btn_fav.setFixedSize(32, 30)
+        self.btn_fav.setToolTip("즐겨찾기에 추가/해제")
+        self.btn_fav.setCursor(Qt.PointingHandCursor)
+        self._update_fav_style()
+        self.btn_fav.clicked.connect(self._toggle_fav)
+
         # Quick Copy Button for this item
         self.btn_copy = QPushButton("📋 복사")
         self.btn_copy.setCursor(Qt.PointingHandCursor)
@@ -70,7 +80,44 @@ class SearchResultItemWidget(QWidget):
         self.btn_copy.clicked.connect(self._copy_url)
 
         layout.addLayout(info_layout, 1)
+        layout.addWidget(self.btn_fav, 0, Qt.AlignVCenter)
         layout.addWidget(self.btn_copy, 0, Qt.AlignVCenter)
+
+    def _update_fav_style(self):
+        is_fav = self.storage.is_favorite(self.track_info) if self.storage else False
+        if is_fav:
+            self.btn_fav.setText("★")
+            self.btn_fav.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 209, 102, 0.18);
+                    color: #FFD166;
+                    border: 1px solid #FFD166;
+                    border-radius: 6px;
+                    font-size: 14px;
+                }
+            """)
+        else:
+            self.btn_fav.setText("☆")
+            self.btn_fav.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 255, 255, 0.05);
+                    color: #8EAEA7;
+                    border: 1px solid #1C4D42;
+                    border-radius: 6px;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    color: #FFD166;
+                    border-color: #FFD166;
+                }
+            """)
+
+    def _toggle_fav(self):
+        if not self.storage:
+            return
+        added = self.storage.toggle_favorite(self.track_info)
+        self._update_fav_style()
+        self.favorite_toggled.emit(self.track_info.get('title', ''), added)
 
     def _copy_url(self):
         url = self.track_info.get('url', '')
@@ -112,9 +159,10 @@ class SearchResultItemWidget(QWidget):
 class YouTubeSearchDialog(QDialog):
     track_selected = pyqtSignal(list, int)  # results_list, selected_index
 
-    def __init__(self, audio_player, parent=None):
+    def __init__(self, audio_player, storage=None, parent=None):
         super().__init__(parent)
         self.audio_player = audio_player
+        self.storage = storage
         self.results = []
 
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
@@ -363,8 +411,9 @@ class YouTubeSearchDialog(QDialog):
             self.label_status.setText(f"{len(results)}개의 음악을 찾았습니다. 더블 클릭하거나 [선택 곡 재생]을 누르세요.")
             for r in results:
                 item = QListWidgetItem(self.list_widget)
-                widget = SearchResultItemWidget(r)
+                widget = SearchResultItemWidget(r, self.storage)
                 widget.copy_requested.connect(self._on_item_copy_requested)
+                widget.favorite_toggled.connect(self._on_item_fav_toggled)
                 item.setSizeHint(widget.sizeHint())
                 self.list_widget.addItem(item)
                 self.list_widget.setItemWidget(item, widget)
@@ -377,6 +426,12 @@ class YouTubeSearchDialog(QDialog):
             self.label_status.setText(err_msg)
 
         self.audio_player.search(query, on_results, on_error)
+
+    def _on_item_fav_toggled(self, title: str, added: bool):
+        if added:
+            self.label_status.setText(f"⭐ '{title[:28]}...' 즐겨찾기에 저장되었습니다!")
+        else:
+            self.label_status.setText(f"즐겨찾기에서 제거되었습니다.")
 
     def _on_item_copy_requested(self, url: str):
         self.label_status.setText("✓ URL이 클립보드에 복사되었습니다!")

@@ -24,6 +24,8 @@ from audio_streamer import AudioPlayer
 from exit_modal import ExitGuardDialog
 from search_modal import YouTubeSearchDialog
 from queue_modal import QueueDialog
+from storage_manager import StorageManager
+from favorites_modal import FavoritesDialog
 
 
 class FocusWindow(QWidget):
@@ -42,6 +44,7 @@ class FocusWindow(QWidget):
         self.anim_timer.start(33)  # ~30 FPS
 
         # Time & Focus state
+        self.storage = StorageManager()
         self.focus_seconds = 0
         self.is_focus_active = True
         self.leave_cooldown = 0  # 10-minute cooldown for temporary exit (in seconds)
@@ -221,8 +224,14 @@ class FocusWindow(QWidget):
         self.timer_label.setStyleSheet("color: #FFFFFF; border: none; background: transparent; letter-spacing: 3px;")
         self.timer_label.setAlignment(Qt.AlignCenter)
 
+        self.today_stat_label = QLabel(self.storage.get_today_summary_text())
+        self.today_stat_label.setFont(QFont("Malgun Gothic", 10))
+        self.today_stat_label.setStyleSheet("color: #9BC4BA; border: none; background: transparent;")
+        self.today_stat_label.setAlignment(Qt.AlignCenter)
+
         card_layout.addWidget(focus_title)
         card_layout.addWidget(self.timer_label)
+        card_layout.addWidget(self.today_stat_label)
 
         # Focus Control Buttons
         btn_box = QHBoxLayout()
@@ -324,6 +333,25 @@ class FocusWindow(QWidget):
         """)
         self.btn_copy_current.clicked.connect(self._copy_current_track_url)
 
+        self.btn_fav_current = QPushButton("☆ 즐겨찾기")
+        self.btn_fav_current.setFocusPolicy(Qt.NoFocus)
+        self.btn_fav_current.setCursor(Qt.PointingHandCursor)
+        self.btn_fav_current.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.06);
+                color: #A3D1C8;
+                border: 1px solid #1C4D42;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                color: #FFD166;
+                border-color: #FFD166;
+            }
+        """)
+        self.btn_fav_current.clicked.connect(self._toggle_current_favorite)
+
         self.status_label = QLabel("")
         self.status_label.setFont(QFont("Malgun Gothic", 10))
         self.status_label.setStyleSheet("color: #4ECCA3; border: none; background: transparent;")
@@ -332,6 +360,8 @@ class FocusWindow(QWidget):
         track_row.addWidget(self.track_title)
         track_row.addSpacing(12)
         track_row.addWidget(self.btn_copy_current)
+        track_row.addSpacing(6)
+        track_row.addWidget(self.btn_fav_current)
         track_row.addStretch()
         track_row.addWidget(self.status_label)
 
@@ -520,7 +550,27 @@ class FocusWindow(QWidget):
         """)
         self.vol_slider.valueChanged.connect(self.audio_player.set_volume)
 
+        self.btn_favorites = QPushButton("⭐ 내 즐겨찾기")
+        self.btn_favorites.setFocusPolicy(Qt.NoFocus)
+        self.btn_favorites.setFont(QFont("Malgun Gothic", 10, QFont.Bold))
+        self.btn_favorites.setCursor(Qt.PointingHandCursor)
+        self.btn_favorites.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 209, 102, 0.12);
+                color: #FFD166;
+                border: 1px solid rgba(255, 209, 102, 0.35);
+                border-radius: 8px;
+                padding: 7px 14px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 209, 102, 0.25);
+                border-color: #FFD166;
+            }
+        """)
+        self.btn_favorites.clicked.connect(self._open_favorites_dialog)
+
         ctrl_row.addWidget(self.btn_search_dialog)
+        ctrl_row.addWidget(self.btn_favorites)
         ctrl_row.addSpacing(4)
         ctrl_row.addWidget(self.btn_prev)
         ctrl_row.addWidget(self.btn_play)
@@ -585,7 +635,12 @@ class FocusWindow(QWidget):
         return btn
 
     def _open_search_dialog(self):
-        dialog = YouTubeSearchDialog(self.audio_player, self)
+        dialog = YouTubeSearchDialog(self.audio_player, self.storage, self)
+        dialog.track_selected.connect(self._on_search_track_selected)
+        dialog.exec_()
+
+    def _open_favorites_dialog(self):
+        dialog = FavoritesDialog(self.storage, self)
         dialog.track_selected.connect(self._on_search_track_selected)
         dialog.exec_()
 
@@ -694,6 +749,12 @@ class FocusWindow(QWidget):
             s = self.focus_seconds % 60
             self.timer_label.setText(f"{h:02d} : {m:02d} : {s:02d}")
 
+            # Persist daily focus stats automatically every 10 seconds
+            self.storage.add_focus_second(1)
+            self.today_stat_label.setText(self.storage.get_today_summary_text())
+            if self.focus_seconds % 10 == 0:
+                self.storage.save()
+
         # Update 10-minute leave cooldown
         if self.leave_cooldown > 0:
             self.leave_cooldown -= 1
@@ -740,6 +801,51 @@ class FocusWindow(QWidget):
         else:
             self.status_label.setText("재생 중인 곡이 없습니다.")
 
+    def _toggle_current_favorite(self):
+        track = self.audio_player.current_track
+        if not track:
+            self.status_label.setText("재생 중인 곡이 없습니다.")
+            return
+        added = self.storage.toggle_favorite(track)
+        self._update_current_fav_btn()
+        if added:
+            self.status_label.setText("⭐ 현재 곡이 즐겨찾기에 저장되었습니다!")
+        else:
+            self.status_label.setText("즐겨찾기에서 제거되었습니다.")
+
+    def _update_current_fav_btn(self):
+        track = self.audio_player.current_track
+        is_fav = self.storage.is_favorite(track) if track else False
+        if is_fav:
+            self.btn_fav_current.setText("★ 저장됨")
+            self.btn_fav_current.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 209, 102, 0.18);
+                    color: #FFD166;
+                    border: 1px solid #FFD166;
+                    border-radius: 6px;
+                    padding: 4px 10px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+        else:
+            self.btn_fav_current.setText("☆ 즐겨찾기")
+            self.btn_fav_current.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 255, 255, 0.06);
+                    color: #A3D1C8;
+                    border: 1px solid #1C4D42;
+                    border-radius: 6px;
+                    padding: 4px 10px;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    color: #FFD166;
+                    border-color: #FFD166;
+                }
+            """)
+
     def _on_audio_status(self, msg: str):
         self.status_label.setText(msg)
 
@@ -748,6 +854,7 @@ class FocusWindow(QWidget):
             self.track_title.setText(f"{title}  —  {uploader}")
         else:
             self.track_title.setText(title)
+        self._update_current_fav_btn()
 
     def _on_audio_state(self, is_playing: bool):
         if is_playing:
@@ -829,8 +936,14 @@ class FocusWindow(QWidget):
             """)
 
     def request_exit(self):
-        dialog = ExitGuardDialog(self.focus_seconds, self)
+        self.storage.save()
+        dialog = ExitGuardDialog(
+            self.focus_seconds,
+            self,
+            today_summary=self.storage.get_today_summary_text()
+        )
         if dialog.exec_() == ExitGuardDialog.Accepted:
+            self.storage.save()
             self.audio_player.stop()
             QApplication.quit()
 

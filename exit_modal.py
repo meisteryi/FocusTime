@@ -9,7 +9,7 @@ from PyQt5.QtGui import QFont
 
 
 class ExitGuardDialog(QDialog):
-    def __init__(self, elapsed_seconds: int, parent=None):
+    def __init__(self, elapsed_seconds: int, parent=None, today_summary: str = ""):
         super().__init__(parent)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -26,15 +26,15 @@ class ExitGuardDialog(QDialog):
         else:
             time_str = f"{seconds}초"
 
-        self.init_ui(time_str)
+        self.init_ui(time_str, today_summary)
 
-    def init_ui(self, time_str: str):
+    def init_ui(self, time_str: str, today_summary: str):
         main_layout = QVBoxLayout(self)
         main_layout.setAlignment(Qt.AlignCenter)
 
         # Container card
         card = QWidget(self)
-        card.setFixedSize(520, 320)
+        card.setFixedSize(540, 360 if today_summary else 320)
         card.setStyleSheet("""
             QWidget {
                 background-color: #0B1C19;
@@ -44,8 +44,8 @@ class ExitGuardDialog(QDialog):
         """)
 
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(40, 40, 40, 40)
-        card_layout.setSpacing(18)
+        card_layout.setContentsMargins(40, 36, 40, 36)
+        card_layout.setSpacing(14)
         card_layout.setAlignment(Qt.AlignCenter)
 
         # Warning Title
@@ -57,14 +57,29 @@ class ExitGuardDialog(QDialog):
 
         # Message
         msg_label = QLabel(
-            f"현재 <b style='color:#4ECCA3; font-size:18px;'>{time_str}</b> 동안 깊게 몰입 중입니다.<br>"
-            "지금 나가시면 소중한 집중 흐름이 끊기게 됩니다.<br><br>"
+            f"현재 세션 <b style='color:#4ECCA3; font-size:18px;'>{time_str}</b> 동안 깊게 몰입 중입니다.<br>"
             "정말 집중을 중단하시겠습니까?", card
         )
         msg_font = QFont("Malgun Gothic", 12)
         msg_label.setFont(msg_font)
         msg_label.setStyleSheet("color: #D3E0DC; border: none; line-height: 1.5; background: transparent;")
         msg_label.setAlignment(Qt.AlignCenter)
+
+        card_layout.addWidget(title_label)
+        card_layout.addWidget(msg_label)
+
+        if today_summary:
+            stat_label = QLabel(today_summary, card)
+            stat_label.setFont(QFont("Malgun Gothic", 10, QFont.Bold))
+            stat_label.setStyleSheet("""
+                color: #FFD166;
+                background: rgba(255, 209, 102, 0.1);
+                border: 1px solid rgba(255, 209, 102, 0.3);
+                border-radius: 10px;
+                padding: 8px 14px;
+            """)
+            stat_label.setAlignment(Qt.AlignCenter)
+            card_layout.addWidget(stat_label)
 
         # Buttons
         btn_layout = QHBoxLayout()
@@ -109,9 +124,7 @@ class ExitGuardDialog(QDialog):
         btn_layout.addWidget(self.btn_continue)
         btn_layout.addWidget(self.btn_exit)
 
-        card_layout.addWidget(title_label)
-        card_layout.addWidget(msg_label)
-        card_layout.addSpacing(10)
+        card_layout.addSpacing(8)
         card_layout.addLayout(btn_layout)
 
         main_layout.addWidget(card)

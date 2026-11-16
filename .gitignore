@@ -24,3 +24,6 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local User Focus Stats & Favorites
+focus_data.json
+
