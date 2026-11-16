@@ -23,6 +23,7 @@ from PyQt5.QtGui import QPainter, QRadialGradient, QColor, QFont
 from audio_streamer import AudioPlayer
 from exit_modal import ExitGuardDialog
 from search_modal import YouTubeSearchDialog
+from queue_modal import QueueDialog
 
 
 class FocusWindow(QWidget):
@@ -32,6 +33,7 @@ class FocusWindow(QWidget):
         # Fullscreen & Taskbar covering flags
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_OpaquePaintEvent)
+        self.setFocusPolicy(Qt.StrongFocus)
 
         # Breathing background state
         self.phase = 0.0
@@ -54,6 +56,8 @@ class FocusWindow(QWidget):
         self.audio_player.title_updated.connect(self._on_audio_title)
         self.audio_player.state_changed.connect(self._on_audio_state)
         self.audio_player.autoplay_changed.connect(self._on_autoplay_changed)
+        self.audio_player.queue_updated.connect(self._on_queue_updated)
+        self.audio_player.normalize_changed.connect(self._on_normalize_changed)
 
         # Initialize UI Layouts
         self.init_ui()
@@ -107,7 +111,7 @@ class FocusWindow(QWidget):
         logo_label.setFont(QFont("Malgun Gothic", 12, QFont.Bold))
         logo_label.setStyleSheet("color: #4ECCA3; letter-spacing: 2px;")
 
-        hint_label = QLabel("ESC : 이탈 경고 및 종료 | F10 : 잠시 외출")
+        hint_label = QLabel("Space : 재생/정지  |  ↑↓ : 볼륨  |  ←→ : 곡 이동  |  F10 : 잠시 외출  |  ESC : 종료")
         hint_label.setFont(QFont("Malgun Gothic", 10))
         hint_label.setStyleSheet("color: #6C8E86;")
 
@@ -125,6 +129,7 @@ class FocusWindow(QWidget):
         """)
 
         self.btn_minimize = QPushButton("🗕 잠시 외출")
+        self.btn_minimize.setFocusPolicy(Qt.NoFocus)
         self.btn_minimize.setCursor(Qt.PointingHandCursor)
         self.btn_minimize.setStyleSheet("""
             QPushButton {
@@ -144,6 +149,7 @@ class FocusWindow(QWidget):
         self.btn_minimize.clicked.connect(self.handle_temporary_exit)
 
         btn_exit_corner = QPushButton("✕")
+        btn_exit_corner.setFocusPolicy(Qt.NoFocus)
         btn_exit_corner.setFixedSize(36, 36)
         btn_exit_corner.setCursor(Qt.PointingHandCursor)
         btn_exit_corner.setStyleSheet("""
@@ -224,6 +230,7 @@ class FocusWindow(QWidget):
         btn_box.setAlignment(Qt.AlignCenter)
 
         self.btn_pause = QPushButton("❚❚ 일시정지")
+        self.btn_pause.setFocusPolicy(Qt.NoFocus)
         self.btn_pause.setFont(QFont("Malgun Gothic", 10, QFont.Bold))
         self.btn_pause.setCursor(Qt.PointingHandCursor)
         self.btn_pause.setStyleSheet("""
@@ -242,6 +249,7 @@ class FocusWindow(QWidget):
         self.btn_pause.clicked.connect(self.toggle_focus)
 
         self.btn_reset = QPushButton("■ 리셋")
+        self.btn_reset.setFocusPolicy(Qt.NoFocus)
         self.btn_reset.setFont(QFont("Malgun Gothic", 10))
         self.btn_reset.setCursor(Qt.PointingHandCursor)
         self.btn_reset.setStyleSheet("""
@@ -297,6 +305,7 @@ class FocusWindow(QWidget):
         self.track_title.setStyleSheet("color: #E2F3F0; border: none; background: transparent;")
 
         self.btn_copy_current = QPushButton("📋 링크 복사")
+        self.btn_copy_current.setFocusPolicy(Qt.NoFocus)
         self.btn_copy_current.setCursor(Qt.PointingHandCursor)
         self.btn_copy_current.setStyleSheet("""
             QPushButton {
@@ -326,12 +335,63 @@ class FocusWindow(QWidget):
         track_row.addStretch()
         track_row.addWidget(self.status_label)
 
+        # Up Next Preview Row
+        up_next_row = QHBoxLayout()
+        self.up_next_label = QLabel("다음 곡: 대기열이 준비되면 이곳에 표시됩니다")
+        self.up_next_label.setFont(QFont("Malgun Gothic", 9))
+        self.up_next_label.setStyleSheet("color: #7DA69E; border: none; background: transparent;")
+
+        self.btn_queue = QPushButton("📜 다음 대기열 보기")
+        self.btn_queue.setFocusPolicy(Qt.NoFocus)
+        self.btn_queue.setCursor(Qt.PointingHandCursor)
+        self.btn_queue.setStyleSheet("""
+            QPushButton {
+                background: rgba(78, 204, 163, 0.1);
+                color: #8FE3CB;
+                border: 1px solid #1E5045;
+                border-radius: 6px;
+                padding: 3px 10px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: #1C5447;
+                color: #FFFFFF;
+                border-color: #4ECCA3;
+            }
+        """)
+        self.btn_queue.clicked.connect(self._open_queue_dialog)
+
+        self.btn_normalize = QPushButton("🎚️ 음량 평준화: ON")
+        self.btn_normalize.setFocusPolicy(Qt.NoFocus)
+        self.btn_normalize.setCursor(Qt.PointingHandCursor)
+        self.btn_normalize.setStyleSheet("""
+            QPushButton {
+                background: rgba(78, 204, 163, 0.12);
+                color: #4ECCA3;
+                border: 1px solid #2A6E5F;
+                border-radius: 6px;
+                padding: 3px 10px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: rgba(78, 204, 163, 0.25);
+            }
+        """)
+        self.btn_normalize.clicked.connect(self.audio_player.toggle_normalize)
+
+        up_next_row.addWidget(self.up_next_label)
+        up_next_row.addStretch()
+        up_next_row.addWidget(self.btn_normalize)
+        up_next_row.addSpacing(8)
+        up_next_row.addWidget(self.btn_queue)
+
         # Controls & Search Row
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(12)
 
         # In-App Search Button (Primary)
         self.btn_search_dialog = QPushButton("🔍 음악 검색")
+        self.btn_search_dialog.setFocusPolicy(Qt.NoFocus)
         self.btn_search_dialog.setFont(QFont("Malgun Gothic", 10, QFont.Bold))
         self.btn_search_dialog.setCursor(Qt.PointingHandCursor)
         self.btn_search_dialog.setStyleSheet("""
@@ -351,12 +411,14 @@ class FocusWindow(QWidget):
 
         # Prev Track
         self.btn_prev = QPushButton("◀◀")
+        self.btn_prev.setFocusPolicy(Qt.NoFocus)
         self.btn_prev.setCursor(Qt.PointingHandCursor)
         self.btn_prev.setStyleSheet(self._playback_ctrl_style())
         self.btn_prev.clicked.connect(self.audio_player.prev_track)
 
         # Play/Pause
         self.btn_play = QPushButton("▶ 재생")
+        self.btn_play.setFocusPolicy(Qt.NoFocus)
         self.btn_play.setFont(QFont("Malgun Gothic", 10, QFont.Bold))
         self.btn_play.setCursor(Qt.PointingHandCursor)
         self.btn_play.setStyleSheet("""
@@ -376,12 +438,14 @@ class FocusWindow(QWidget):
 
         # Next Track
         self.btn_next = QPushButton("▶▶")
+        self.btn_next.setFocusPolicy(Qt.NoFocus)
         self.btn_next.setCursor(Qt.PointingHandCursor)
         self.btn_next.setStyleSheet(self._playback_ctrl_style())
         self.btn_next.clicked.connect(self.audio_player.next_track)
 
         # Autoplay Indicator / Toggle Button
         self.btn_autoplay = QPushButton("📻 연관곡 자동재생: ON")
+        self.btn_autoplay.setFocusPolicy(Qt.NoFocus)
         self.btn_autoplay.setCursor(Qt.PointingHandCursor)
         self.btn_autoplay.setStyleSheet("""
             QPushButton {
@@ -408,6 +472,7 @@ class FocusWindow(QWidget):
 
         # Custom URL Button
         btn_custom = QPushButton("🔗 URL")
+        btn_custom.setFocusPolicy(Qt.NoFocus)
         btn_custom.setCursor(Qt.PointingHandCursor)
         btn_custom.setStyleSheet("""
             QPushButton {
@@ -431,6 +496,7 @@ class FocusWindow(QWidget):
         vol_label.setStyleSheet("border:none; color:#8CA8A2; background: transparent;")
 
         self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.setFocusPolicy(Qt.NoFocus)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setValue(70)
         self.vol_slider.setFixedWidth(110)
@@ -471,6 +537,7 @@ class FocusWindow(QWidget):
         ctrl_row.addWidget(self.vol_slider)
 
         player_layout.addLayout(track_row)
+        player_layout.addLayout(up_next_row)
         player_layout.addLayout(ctrl_row)
 
         main_layout.addWidget(player_card)
@@ -497,6 +564,7 @@ class FocusWindow(QWidget):
 
     def _create_preset_btn(self, name: str, url: str, title: str) -> QPushButton:
         btn = QPushButton(name)
+        btn.setFocusPolicy(Qt.NoFocus)
         btn.setCursor(Qt.PointingHandCursor)
         btn.setStyleSheet("""
             QPushButton {
@@ -715,6 +783,51 @@ class FocusWindow(QWidget):
                 QPushButton:hover { background: rgba(255, 255, 255, 0.1); }
             """)
 
+    def _open_queue_dialog(self):
+        dialog = QueueDialog(self.audio_player, self)
+        dialog.exec_()
+
+    def _on_queue_updated(self, queue: list, current_index: int):
+        next_idx = current_index + 1
+        if 0 <= next_idx < len(queue):
+            next_title = queue[next_idx].get('title', 'Unknown')
+            if len(next_title) > 55:
+                next_title = next_title[:52] + "..."
+            remaining = len(queue) - next_idx
+            self.up_next_label.setText(f"다음 곡: {next_title}  (대기열 {remaining}곡)")
+        elif queue:
+            self.up_next_label.setText("다음 곡: YouTube 알고리즘 추천 곡 탐색 중...")
+        else:
+            self.up_next_label.setText("다음 곡: 대기열이 준비되면 이곳에 표시됩니다")
+
+    def _on_normalize_changed(self, active: bool):
+        if active:
+            self.btn_normalize.setText("🎚️ 음량 평준화: ON")
+            self.btn_normalize.setStyleSheet("""
+                QPushButton {
+                    background: rgba(78, 204, 163, 0.12);
+                    color: #4ECCA3;
+                    border: 1px solid #2A6E5F;
+                    border-radius: 6px;
+                    padding: 3px 10px;
+                    font-size: 11px;
+                }
+                QPushButton:hover { background: rgba(78, 204, 163, 0.25); }
+            """)
+        else:
+            self.btn_normalize.setText("🎚️ 음량 평준화: OFF")
+            self.btn_normalize.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 255, 255, 0.05);
+                    color: #7E9E96;
+                    border: 1px solid #1B453D;
+                    border-radius: 6px;
+                    padding: 3px 10px;
+                    font-size: 11px;
+                }
+                QPushButton:hover { background: rgba(255, 255, 255, 0.1); }
+            """)
+
     def request_exit(self):
         dialog = ExitGuardDialog(self.focus_seconds, self)
         if dialog.exec_() == ExitGuardDialog.Accepted:
@@ -722,9 +835,24 @@ class FocusWindow(QWidget):
             QApplication.quit()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
+        key = event.key()
+        if key == Qt.Key_Escape:
             self.request_exit()
-        elif event.key() == Qt.Key_F10:
+        elif key == Qt.Key_F10:
             self.handle_temporary_exit()
+        elif key == Qt.Key_Space:
+            self.audio_player.toggle_play()
+        elif key == Qt.Key_Up:
+            new_vol = min(100, self.vol_slider.value() + 5)
+            self.vol_slider.setValue(new_vol)
+            self.status_label.setText(f"🔊 볼륨: {new_vol}%")
+        elif key == Qt.Key_Down:
+            new_vol = max(0, self.vol_slider.value() - 5)
+            self.vol_slider.setValue(new_vol)
+            self.status_label.setText(f"🔊 볼륨: {new_vol}%")
+        elif key == Qt.Key_Right:
+            self.audio_player.next_track()
+        elif key == Qt.Key_Left:
+            self.audio_player.prev_track()
         else:
             super().keyPressEvent(event)
